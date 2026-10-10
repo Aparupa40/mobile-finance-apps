@@ -1,0 +1,92 @@
+name: Build Android APKs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "KIVY_MOBILE_APPS_CLOUD_APK_BUILD (1).zip"
+      - ".github/workflows/build-apks.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apks:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Android and Buildozer dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git zip unzip openjdk-17-jdk python3-pip python3-venv \
+            autoconf libtool pkg-config zlib1g-dev libncurses5-dev \
+            libncursesw5-dev libtinfo5 cmake libffi-dev libssl-dev \
+            automake autopoint gettext
+          python3 -m pip install --user --upgrade pip setuptools wheel
+          python3 -m pip install --user buildozer cython==0.29.36
+
+      - name: Extract app source and locate projects
+        id: projects
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/build-src" "$GITHUB_WORKSPACE/apk-output"
+          ZIP_FILE="$(find . -maxdepth 2 -type f -iname '*.zip' | head -n 1)"
+          if [[ -z "$ZIP_FILE" ]]; then
+            echo "No source ZIP was found in the repository."
+            exit 1
+          fi
+          echo "Extracting: $ZIP_FILE"
+          unzip -q "$ZIP_FILE" -d "$GITHUB_WORKSPACE/build-src"
+          echo "Extracted files:"
+          find "$GITHUB_WORKSPACE/build-src" -maxdepth 4 -type f | head -n 250
+          mapfile -t SPECS < <(find "$GITHUB_WORKSPACE/build-src" -type f -name buildozer.spec | sort)
+          if [[ "${#SPECS[@]}" -eq 0 ]]; then
+            echo "::error::No buildozer.spec found in the uploaded ZIP. The archive may contain instructions or source without complete Android build configuration."
+            exit 2
+          fi
+          printf '%s\n' "${SPECS[@]}" > "$GITHUB_WORKSPACE/build-src/buildozer-spec-list.txt"
+          echo "Found ${#SPECS[@]} Buildozer project(s)."
+
+      - name: Build each APK
+        shell: bash
+        run: |
+          set -uo pipefail
+          while IFS= read -r SPEC; do
+            [[ -n "$SPEC" ]] || continue
+            PROJECT_DIR="$(dirname "$SPEC")"
+            PROJECT_NAME="$(basename "$PROJECT_DIR")"
+            [[ "$PROJECT_NAME" == "." || "$PROJECT_NAME" == "/" ]] && PROJECT_NAME="mobile-app"
+            echo "::group::Building $PROJECT_NAME ($PROJECT_DIR)"
+            cd "$PROJECT_DIR"
+            export PATH="$HOME/.local/bin:$PATH"
+            yes | buildozer -v android debug
+            BUILD_STATUS=$?
+            echo "::endgroup::"
+            if [[ "$BUILD_STATUS" -eq 0 ]]; then
+              mkdir -p "$GITHUB_WORKSPACE/apk-output/$PROJECT_NAME"
+              find bin -maxdepth 1 -type f -name '*.apk' -exec cp {} "$GITHUB_WORKSPACE/apk-output/$PROJECT_NAME/" \; 2>/dev/null || true
+            else
+              echo "::error::Build failed for $PROJECT_NAME (exit $BUILD_STATUS)"
+              exit "$BUILD_STATUS"
+            fi
+          done < "$GITHUB_WORKSPACE/build-src/buildozer-spec-list.txt"
+          if ! find "$GITHUB_WORKSPACE/apk-output" -type f -name '*.apk' | grep -q .; then
+            echo "::error::Build completed without producing APK files."
+            exit 3
+          fi
+          find "$GITHUB_WORKSPACE/apk-output" -type f -name '*.apk' -print
+
+      - name: Upload APK artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-finance-android-apks
+          path: apk-output/**/*.apk
+          if-no-files-found: warn
+          retention-days: 14
