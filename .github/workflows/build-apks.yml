@@ -20,7 +20,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Android and Buildozer dependencies
+        shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y git zip unzip openjdk-17-jdk python3-pip python3-venv autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 cmake libffi-dev libssl-dev automake autopoint gettext
           python3 -m pip install --user --upgrade pip setuptools wheel
@@ -44,7 +46,6 @@ jobs:
             echo "::error::No buildozer.spec found in uploaded ZIP."
             exit 2
           fi
-          # Pin p4a to the upstream fix for the pip BuildDependencyInstallError regression.
           for SPEC in "${SPECS[@]}"; do
             if ! grep -q '^p4a.commit[[:space:]]*=' "$SPEC"; then
               printf '\n# Work around python-for-android pip BuildDependencyInstallError regression\np4a.branch = develop\np4a.commit = d2ee8c5\n' >> "$SPEC"
@@ -64,7 +65,7 @@ jobs:
             echo "::group::Building $PROJECT_NAME"
             cd "$PROJECT_DIR"
             export PATH="$HOME/.local/bin:$PATH"
-            buildozer -v android debug
+            yes | buildozer android debug
             BUILD_STATUS=$?
             echo "::endgroup::"
             if [[ "$BUILD_STATUS" -eq 0 ]]; then
