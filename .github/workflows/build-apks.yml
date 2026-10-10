@@ -22,11 +22,7 @@ jobs:
       - name: Install Android and Buildozer dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            git zip unzip openjdk-17-jdk python3-pip python3-venv \
-            autoconf libtool pkg-config zlib1g-dev libncurses5-dev \
-            libncursesw5-dev libtinfo5 cmake libffi-dev libssl-dev \
-            automake autopoint gettext
+          sudo apt-get install -y git zip unzip openjdk-17-jdk python3-pip python3-venv autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 cmake libffi-dev libssl-dev automake autopoint gettext
           python3 -m pip install --user --upgrade pip setuptools wheel
           python3 -m pip install --user buildozer cython==0.29.36
 
@@ -36,22 +32,26 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/build-src" "$GITHUB_WORKSPACE/apk-output"
-          ZIP_FILE="$(find . -maxdepth 2 -type f -iname '*.zip' | head -n 1)"
+          ZIP_FILE="$(find . -maxdepth 2 -type f -iname '*.zip' ! -name '*CORRECTED*' | head -n 1)"
           if [[ -z "$ZIP_FILE" ]]; then
-            echo "No source ZIP was found in the repository."
+            echo "::error::No source ZIP was found in the repository."
             exit 1
           fi
           echo "Extracting: $ZIP_FILE"
           unzip -q "$ZIP_FILE" -d "$GITHUB_WORKSPACE/build-src"
-          echo "Extracted files:"
-          find "$GITHUB_WORKSPACE/build-src" -maxdepth 4 -type f | head -n 250
           mapfile -t SPECS < <(find "$GITHUB_WORKSPACE/build-src" -type f -name buildozer.spec | sort)
           if [[ "${#SPECS[@]}" -eq 0 ]]; then
-            echo "::error::No buildozer.spec found in the uploaded ZIP. The archive may contain instructions or source without complete Android build configuration."
+            echo "::error::No buildozer.spec found in uploaded ZIP."
             exit 2
           fi
+          # Pin p4a to the upstream fix for the pip BuildDependencyInstallError regression.
+          for SPEC in "${SPECS[@]}"; do
+            if ! grep -q '^p4a.commit[[:space:]]*=' "$SPEC"; then
+              printf '\n# Work around python-for-android pip BuildDependencyInstallError regression\np4a.branch = develop\np4a.commit = d2ee8c5\n' >> "$SPEC"
+            fi
+          done
           printf '%s\n' "${SPECS[@]}" > "$GITHUB_WORKSPACE/build-src/buildozer-spec-list.txt"
-          echo "Found ${#SPECS[@]} Buildozer project(s)."
+          echo "Found ${#SPECS[@]} Buildozer project(s), with p4a pinned to the fix."
 
       - name: Build each APK
         shell: bash
@@ -61,11 +61,10 @@ jobs:
             [[ -n "$SPEC" ]] || continue
             PROJECT_DIR="$(dirname "$SPEC")"
             PROJECT_NAME="$(basename "$PROJECT_DIR")"
-            [[ "$PROJECT_NAME" == "." || "$PROJECT_NAME" == "/" ]] && PROJECT_NAME="mobile-app"
-            echo "::group::Building $PROJECT_NAME ($PROJECT_DIR)"
+            echo "::group::Building $PROJECT_NAME"
             cd "$PROJECT_DIR"
             export PATH="$HOME/.local/bin:$PATH"
-            yes | buildozer -v android debug
+            buildozer -v android debug
             BUILD_STATUS=$?
             echo "::endgroup::"
             if [[ "$BUILD_STATUS" -eq 0 ]]; then
@@ -77,7 +76,7 @@ jobs:
             fi
           done < "$GITHUB_WORKSPACE/build-src/buildozer-spec-list.txt"
           if ! find "$GITHUB_WORKSPACE/apk-output" -type f -name '*.apk' | grep -q .; then
-            echo "::error::Build completed without producing APK files."
+            echo "::error::No APK files were produced."
             exit 3
           fi
           find "$GITHUB_WORKSPACE/apk-output" -type f -name '*.apk' -print
