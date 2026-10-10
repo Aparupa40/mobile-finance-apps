@@ -1,25 +1,46 @@
-name: Build Android APKs
+name: Build One Android APK
 
 on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: "Choose which app to build"
+        required: true
+        type: choice
+        options:
+          - MentionManager
+          - ExpenseTracker
+        default: MentionManager
   push:
     branches: [main]
     paths:
       - "KIVY_MOBILE_APPS_CLOUD_APK_BUILD (1).zip"
       - ".github/workflows/build-apks.yml"
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  build-apks:
+  build-apk:
+    name: Build ${{ inputs.app || 'MentionManager' }} APK
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 20
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install Android and Buildozer dependencies
+      - name: Cache Android SDK, NDK and Buildozer downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer
+            ~/.cache/pip
+          key: android-buildozer-${{ runner.os }}-${{ inputs.app || 'MentionManager' }}-${{ hashFiles('KIVY_MOBILE_APPS_CLOUD_APK_BUILD (1).zip') }}
+          restore-keys: |
+            android-buildozer-${{ runner.os }}-${{ inputs.app || 'MentionManager' }}-
+            android-buildozer-${{ runner.os }}-
+
+      - name: Install build dependencies
         shell: bash
         run: |
           set -euo pipefail
@@ -27,66 +48,54 @@ jobs:
           sudo apt-get install -y git zip unzip openjdk-17-jdk python3-pip python3-venv autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 cmake libffi-dev libssl-dev automake autopoint gettext
           python3 -m pip install --user --upgrade pip setuptools wheel
           python3 -m pip install --user buildozer cython==0.29.36
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Extract app source and locate projects
-        id: projects
+      - name: Extract selected app
+        id: app
         shell: bash
+        env:
+          SELECTED_APP: ${{ inputs.app || 'MentionManager' }}
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/build-src" "$GITHUB_WORKSPACE/apk-output"
           ZIP_FILE="$(find . -maxdepth 2 -type f -iname '*.zip' ! -name '*CORRECTED*' | head -n 1)"
-          if [[ -z "$ZIP_FILE" ]]; then
-            echo "::error::No source ZIP was found in the repository."
-            exit 1
-          fi
-          echo "Extracting: $ZIP_FILE"
+          test -n "$ZIP_FILE" || { echo "::error::Source ZIP not found"; exit 1; }
           unzip -q "$ZIP_FILE" -d "$GITHUB_WORKSPACE/build-src"
-          mapfile -t SPECS < <(find "$GITHUB_WORKSPACE/build-src" -type f -name buildozer.spec | sort)
-          if [[ "${#SPECS[@]}" -eq 0 ]]; then
-            echo "::error::No buildozer.spec found in uploaded ZIP."
+          SPEC="$(find "$GITHUB_WORKSPACE/build-src" -type f -path "*/$SELECTED_APP/buildozer.spec" | head -n 1)"
+          if [[ -z "$SPEC" ]]; then
+            echo "::error::No buildozer.spec found for $SELECTED_APP in $ZIP_FILE"
+            find "$GITHUB_WORKSPACE/build-src" -type f -name buildozer.spec -print
             exit 2
           fi
-          for SPEC in "${SPECS[@]}"; do
-            if ! grep -q '^p4a.commit[[:space:]]*=' "$SPEC"; then
-              printf '\n# Work around python-for-android pip BuildDependencyInstallError regression\np4a.branch = develop\np4a.commit = d2ee8c5\n' >> "$SPEC"
-            fi
-          done
-          printf '%s\n' "${SPECS[@]}" > "$GITHUB_WORKSPACE/build-src/buildozer-spec-list.txt"
-          echo "Found ${#SPECS[@]} Buildozer project(s), with p4a pinned to the fix."
-
-      - name: Build each APK
-        shell: bash
-        run: |
-          set -uo pipefail
-          while IFS= read -r SPEC; do
-            [[ -n "$SPEC" ]] || continue
-            PROJECT_DIR="$(dirname "$SPEC")"
-            PROJECT_NAME="$(basename "$PROJECT_DIR")"
-            echo "::group::Building $PROJECT_NAME"
-            cd "$PROJECT_DIR"
-            export PATH="$HOME/.local/bin:$PATH"
-            yes | buildozer android debug
-            BUILD_STATUS=$?
-            echo "::endgroup::"
-            if [[ "$BUILD_STATUS" -eq 0 ]]; then
-              mkdir -p "$GITHUB_WORKSPACE/apk-output/$PROJECT_NAME"
-              find bin -maxdepth 1 -type f -name '*.apk' -exec cp {} "$GITHUB_WORKSPACE/apk-output/$PROJECT_NAME/" \; 2>/dev/null || true
-            else
-              echo "::error::Build failed for $PROJECT_NAME (exit $BUILD_STATUS)"
-              exit "$BUILD_STATUS"
-            fi
-          done < "$GITHUB_WORKSPACE/build-src/buildozer-spec-list.txt"
-          if ! find "$GITHUB_WORKSPACE/apk-output" -type f -name '*.apk' | grep -q .; then
-            echo "::error::No APK files were produced."
-            exit 3
+          PROJECT_DIR="$(dirname "$SPEC")"
+          if ! grep -q '^p4a.commit[[:space:]]*=' "$SPEC"; then
+            printf '\n# Pin python-for-android fix for pip BuildDependencyInstallError\np4a.branch = develop\np4a.commit = d2ee8c5\n' >> "$SPEC"
           fi
-          find "$GITHUB_WORKSPACE/apk-output" -type f -name '*.apk' -print
+          if ! grep -q '^android.accept_sdk_license[[:space:]]*=' "$SPEC"; then
+            printf '\n# Accept Android SDK licenses in CI\nandroid.accept_sdk_license = True\n' >> "$SPEC"
+          fi
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "Selected app: $SELECTED_APP"
+          echo "Project directory: $PROJECT_DIR"
 
-      - name: Upload APK artifacts
+      - name: Build selected APK
+        shell: bash
+        env:
+          PROJECT_DIR: ${{ steps.app.outputs.project_dir }}
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          # Buildozer accepts SDK licenses via the spec option; yes is a fallback for any SDK prompt.
+          set +o pipefail
+          yes | buildozer -v android debug
+          set -o pipefail
+          find bin -maxdepth 1 -type f -name '*.apk' -print -exec cp {} "$GITHUB_WORKSPACE/apk-output/" \;
+
+      - name: Upload APK artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mobile-finance-android-apks
-          path: apk-output/**/*.apk
+          name: ${{ inputs.app || 'MentionManager' }}-android-apk
+          path: apk-output/*.apk
           if-no-files-found: warn
           retention-days: 14
