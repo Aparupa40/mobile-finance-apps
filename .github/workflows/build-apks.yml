@@ -24,7 +24,7 @@ jobs:
   build-apk:
     name: Build ${{ inputs.app || 'MentionManager' }} APK
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -35,9 +35,11 @@ jobs:
           path: |
             ~/.buildozer
             ~/.cache/pip
-          key: android-buildozer-${{ runner.os }}-${{ inputs.app || 'MentionManager' }}-${{ hashFiles('KIVY_MOBILE_APPS_CLOUD_APK_BUILD (1).zip') }}
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: android-buildozer-v2-${{ runner.os }}-${{ inputs.app || 'MentionManager' }}-${{ hashFiles('KIVY_MOBILE_APPS_CLOUD_APK_BUILD (1).zip') }}
           restore-keys: |
-            android-buildozer-${{ runner.os }}-${{ inputs.app || 'MentionManager' }}-
+            android-buildozer-v2-${{ runner.os }}-${{ inputs.app || 'MentionManager' }}-
             android-buildozer-${{ runner.os }}-
 
       - name: Install build dependencies
